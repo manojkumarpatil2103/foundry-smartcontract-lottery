@@ -33,8 +33,16 @@ import {VRFConsumerBaseV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFCo
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
 contract Raffle is VRFConsumerBaseV2Plus {
+    /** Type Decleration */
+    enum RaffleState {
+        OPEN, // 0
+        CALCULATING // 1
+    }
+
     /* Errors */
     error Raffle__SendmoreToEnterRaffle();
+    error Raffle__TransferFailed();
+    error Raffle__RaffleNotOpen();
 
     uint16 private constant REQUEST_CONFIRMATIONS = 3;
     uint32 private constant NUM_WORDS = 1;
@@ -45,11 +53,14 @@ contract Raffle is VRFConsumerBaseV2Plus {
     uint256 private immutable i_subscriptionId;
     uint32 private immutable i_callbackGasLimit;
     uint256 private s_lastTimestamp;
+    address private s_recentWinner;
+    RaffleState private s_raffleState;
     address payable[] private s_players; // The list of players entering into the raffle
     // who ever wins it should be paid to them. then make it as a 'payable'.
 
     /**  EVENTS */
     event RaffleEntered(address indexed player);
+    event WinnerPicked(address indexed winner);
 
     /**We need to use the constructor of inherited codebase(VRFConsumerBaseV2Plus),
      * Then it needs a vrfCoordinator address, will pass to our constructor
@@ -66,10 +77,12 @@ contract Raffle is VRFConsumerBaseV2Plus {
     ) VRFConsumerBaseV2Plus(vrfCoordinator) {
         i_entranceFee = entranceFee;
         i_interval = interval;
-        s_lastTimestamp = block.timestamp;
         i_keyHash = gasLane;
         i_subscriptionId = subscriptionId;
         i_callbackGasLimit = callbackGasLimit;
+
+        s_lastTimestamp = block.timestamp;
+        s_raffleState = RaffleState.OPEN; //It as same as RaffleState(0)
     }
 
     function enterRaffle() external payable {
@@ -78,7 +91,12 @@ contract Raffle is VRFConsumerBaseV2Plus {
         if (msg.value < i_entranceFee) {
             revert Raffle__SendmoreToEnterRaffle();
         }
-        s_players.push(payable(msg.sender)); // here payable keyword becoz, to receive an eth to address.
+
+        if (s_raffleState != RaffleState.OPEN) {
+            revert Raffle__RaffleNotOpen();
+        }
+
+        s_players.push(payable(msg.sender)); // here payable keyword becoz, to receive an eth to the address.
 
         emit RaffleEntered(msg.sender); //Anytime you update the storage variable, then emit the event
 
@@ -95,6 +113,9 @@ contract Raffle is VRFConsumerBaseV2Plus {
         if ((block.timestamp - s_lastTimestamp) < i_interval) {
             revert();
         }
+
+        s_raffleState = RaffleState.CALCULATING;
+
         // Get our random number 2.5
         // 1. Request RNG
         // 2. Get RNG
@@ -115,10 +136,34 @@ contract Raffle is VRFConsumerBaseV2Plus {
         uint256 requestId = s_vrfCoordinator.requestRandomWords(request);
     }
 
+    // CEI : checks, Effects, and Interactions pattern
     function fulfillRandomWords(
         uint256 requestId,
         uint256[] calldata randomWords
-    ) internal override {}
+    ) internal override {
+        // checks
+
+        // s_player =10
+        // random number(rng) = 12
+        // 12 % 10 = 2
+        // we get a big string like 868767857657744766878798978987767 % 10 = 9 (or somthing)
+
+        // Effects (Internal Contract state)
+        uint256 indexOfWinner = randomWords[0] % s_players.length; //randomWords[0] because we kept 1 for a NUM_WORDS
+        address payable recentWinner = s_players[indexOfWinner];
+        s_recentWinner = recentWinner;
+        s_raffleState = RaffleState.OPEN;
+
+        // Interactions  (External Contract Interactions)
+        s_players = new address payable[](0); // becoz, there will be a players after entering a Raffle
+        s_lastTimestamp = block.timestamp;
+        emit WinnerPicked(s_recentWinner);
+
+        (bool success, ) = recentWinner.call{value: address(this).balance}("");
+        if (!success) {
+            revert Raffle__TransferFailed();
+        }
+    }
 
     /** Getter function */
     function getEntranceFee() external view returns (uint256) {
